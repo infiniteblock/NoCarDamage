@@ -1,7 +1,8 @@
 static const string NCD_CFG_DIR  = "$profile:NoCarDamage";
 static const string NCD_CFG_PATH = "$profile:NoCarDamage\\NoCarDamage_Config.json";
-static const int NCD_CFG_VERSION = 11;
+static const int NCD_CFG_VERSION = 22;
 static const int NCD_RPC_FLIP = 4000971;
+static const int NCD_PRECRASH_CACHE_MS = 1000;
 
 ref map<string, int> NCD_ToxicPresence = new map<string, int>();
 
@@ -54,6 +55,7 @@ class NCD_VehicleOverride
 	int Vehicle_NoDamageToPlayers = -1;
 	int Vehicle_NoDamageToExpansionAI = -1;
 	int Vehicle_AutoFlip = -1;
+	float Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
 	int Player_NoDamageWhileInVehicle = -1;
 	int Player_BlockAllDamageWhileInVehicle = -1;
 	int Player_BlockBulletsWhileInVehicle = -1;
@@ -68,6 +70,7 @@ class NCD_VehicleOverride
 	int ExpansionAI_DoorOpenDisablesProtectionInContaminated = -1;
 	int ExpansionAI_NoDamageAfterJumpFromVehicle = -1;
 	int Protect_AttachmentsOnVehicle = -1;
+	int Protect_PlayerClothingInVehicle = -1;
 }
 
 class NCD_Config
@@ -78,6 +81,7 @@ class NCD_Config
 	int Vehicle_BlockMelee = 0;
 	int Vehicle_AllowGlassDamage = 0;
 	int Vehicle_DisableCrashDamage = 1;
+	float Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
 	int Vehicle_DisableWaterDamage = 1;
 	int Vehicle_BlockContaminated = 0;
 	int Player_BlockContaminatedWhileInVehicle = 0;
@@ -87,6 +91,7 @@ class NCD_Config
 	int Player_BlockBulletsWhileInVehicle = 1;
 	int Player_BlockExplosionsWhileInVehicle = 1;
 	int Player_BlockMeleeWhileInVehicle = 0;
+	int Protect_PlayerClothingInVehicle = 1;
 	int Protect_AttachmentsOnVehicle = 1;
 	int Vehicle_DisableRedlineDamage = 1;
 	int Vehicle_BlockCrewCrashDamage = 1;
@@ -98,6 +103,9 @@ class NCD_Config
 	int Vehicle_AutoFlip = 0;
 	int Vehicle_AutoFlipWithButton = 0;
 	int Player_NoDamageAfterJumpFromVehicle = 0;
+	float Player_NoDamageAfterJump_MinSpeedKmh = 8.0;
+	float Player_NoDamageAfterJump_MaxSpeedKmh = -1.0;
+	int Player_NoDamageAfterJump_WindowMS = 1500;
 	int ExpansionAI_NoDamageWhileInVehicle = 0;
 	int ExpansionAI_BlockAllDamageWhileInVehicle = 0;
 	int ExpansionAI_BlockBulletsWhileInVehicle = 0;
@@ -124,6 +132,8 @@ static ref map<string, ref NCD_ResolvedVehicleRules> g_NCD_ResolvedRulesMap;
 static bool g_NCD_HasToxicOverrides = false;
 static int g_NCD_ExpansionVehiclesState = -1;
 static int g_NCD_ExpansionDisableVehicleDamageState = -1;
+static ref map<int, ref array<float>> g_NCD_PreCrashSpeedCache;
+static ref map<int, int> g_NCD_PreCrashCacheTime;
 
 class NCD_ExpansionVehicleSettingsLite
 {
@@ -229,6 +239,7 @@ bool NCD_IsOverrideNoOp(NCD_VehicleOverride o)
 	if (o.Vehicle_NoDamageToPlayers != -1) return false;
 	if (o.Vehicle_NoDamageToExpansionAI != -1) return false;
 	if (o.Vehicle_AutoFlip != -1) return false;
+	if (o.Vehicle_DisableCrash_MaxSpeedKmh != -1.0) return false;
 	if (o.Player_NoDamageWhileInVehicle != -1) return false;
 	if (o.Player_BlockAllDamageWhileInVehicle != -1) return false;
 	if (o.Player_BlockBulletsWhileInVehicle != -1) return false;
@@ -243,6 +254,7 @@ bool NCD_IsOverrideNoOp(NCD_VehicleOverride o)
 	if (o.ExpansionAI_DoorOpenDisablesProtectionInContaminated != -1) return false;
 	if (o.ExpansionAI_NoDamageAfterJumpFromVehicle != -1) return false;
 	if (o.Protect_AttachmentsOnVehicle != -1) return false;
+	if (o.Protect_PlayerClothingInVehicle != -1) return false;
 
 	return true;
 }
@@ -264,6 +276,7 @@ class NCD_ResolvedVehicleRules
 	int Vehicle_NoDamageToPlayers;
 	int Vehicle_NoDamageToExpansionAI;
 	int Vehicle_AutoFlip;
+	float Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
 
 	int Player_NoDamageWhileInVehicle;
 	int Player_BlockAllDamageWhileInVehicle;
@@ -282,6 +295,7 @@ class NCD_ResolvedVehicleRules
 	int ExpansionAI_DoorOpenDisablesProtectionInContaminated;
 
 	int Protect_AttachmentsOnVehicle;
+	int Protect_PlayerClothingInVehicle;
 }
 
 bool NCD_MigrateConfig()
@@ -392,6 +406,39 @@ bool NCD_MigrateConfig()
 		changed = true;
 	}
 
+	if (g_NCD_Cfg.Version < 20)
+	{
+		g_NCD_Cfg.Protect_PlayerClothingInVehicle = 1;
+
+		g_NCD_Cfg.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+		g_NCD_Cfg.Player_NoDamageAfterJump_MaxSpeedKmh = -1.0;
+		g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS = 1500;
+
+		for (int om = 0; om < g_NCD_Cfg.VehicleOverrides.Count(); om++)
+		{
+			NCD_VehicleOverride ov5 = g_NCD_Cfg.VehicleOverrides[om];
+			if (!ov5) continue;
+			ov5.Protect_PlayerClothingInVehicle = -1;
+			ov5.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+		}
+
+		g_NCD_Cfg.Version = 20;
+		changed = true;
+	}
+
+	if (g_NCD_Cfg.Version < 21)
+	{
+		g_NCD_Cfg.Version = 21;
+		changed = true;
+	}
+
+	if (g_NCD_Cfg.Version < 22)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_MinSpeedKmh = 8.0;
+		g_NCD_Cfg.Version = 22;
+		changed = true;
+	}
+
 	if (g_NCD_Cfg.Version < NCD_CFG_VERSION)
 	{
 		g_NCD_Cfg.Version = NCD_CFG_VERSION;
@@ -447,10 +494,20 @@ bool NCD_BackfillMissingConfigKeys()
 	bool hasExpansionAINoJumpDmg = NCD_ConfigFileHasKey("ExpansionAI_NoDamageAfterJumpFromVehicle");
 	bool hasCrewCrash = NCD_ConfigFileHasKey("Vehicle_BlockCrewCrashDamage");
 	bool hasCrashSounds = NCD_ConfigFileHasKey("Vehicle_EnableCrashSounds");
+	bool hasProtectClothing = NCD_ConfigFileHasKey("Protect_PlayerClothingInVehicle");
+	bool hasMaxSpeed = NCD_ConfigFileHasKey("Vehicle_DisableCrash_MaxSpeedKmh");
+	bool hasJumpMinKmh = NCD_ConfigFileHasKey("Player_NoDamageAfterJump_MinSpeedKmh");
+	bool hasJumpMaxKmh = NCD_ConfigFileHasKey("Player_NoDamageAfterJump_MaxSpeedKmh");
+	bool hasJumpWindow = NCD_ConfigFileHasKey("Player_NoDamageAfterJump_WindowMS");
 
 	NCD_Config defaults = new NCD_Config();
 	bool changed = false;
 
+	if (!hasMaxSpeed)
+	{
+		g_NCD_Cfg.Vehicle_DisableCrash_MaxSpeedKmh = defaults.Vehicle_DisableCrash_MaxSpeedKmh;
+		changed = true;
+	}
 	if (!hasRedline)
 	{
 		g_NCD_Cfg.Vehicle_DisableRedlineDamage = defaults.Vehicle_DisableRedlineDamage;
@@ -536,6 +593,31 @@ bool NCD_BackfillMissingConfigKeys()
 		g_NCD_Cfg.Vehicle_EnableCrashSounds = defaults.Vehicle_EnableCrashSounds;
 		changed = true;
 	}
+	if (!hasProtectClothing)
+	{
+		g_NCD_Cfg.Protect_PlayerClothingInVehicle = defaults.Protect_PlayerClothingInVehicle;
+		changed = true;
+	}
+	if (!hasMaxSpeed)
+	{
+		g_NCD_Cfg.Vehicle_DisableCrash_MaxSpeedKmh = defaults.Vehicle_DisableCrash_MaxSpeedKmh;
+		changed = true;
+	}
+	if (!hasJumpMinKmh)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_MinSpeedKmh = defaults.Player_NoDamageAfterJump_MinSpeedKmh;
+		changed = true;
+	}
+	if (!hasJumpMaxKmh)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_MaxSpeedKmh = -1.0;
+		changed = true;
+	}
+	if (!hasJumpWindow)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS = 1500;
+		changed = true;
+	}
 
 	g_NCD_Cfg.Vehicle_BlockBullets = NCD_NormalizeBool01(g_NCD_Cfg.Vehicle_BlockBullets, defaults.Vehicle_BlockBullets);
 	g_NCD_Cfg.Vehicle_BlockExplosions = NCD_NormalizeBool01(g_NCD_Cfg.Vehicle_BlockExplosions, defaults.Vehicle_BlockExplosions);
@@ -562,6 +644,41 @@ bool NCD_BackfillMissingConfigKeys()
 	g_NCD_Cfg.Player_BlockExplosionsWhileInVehicle = NCD_NormalizeBool01(g_NCD_Cfg.Player_BlockExplosionsWhileInVehicle, defaults.Player_BlockExplosionsWhileInVehicle);
 	g_NCD_Cfg.Player_BlockMeleeWhileInVehicle = NCD_NormalizeBool01(g_NCD_Cfg.Player_BlockMeleeWhileInVehicle, defaults.Player_BlockMeleeWhileInVehicle);
 	g_NCD_Cfg.Player_NoDamageAfterJumpFromVehicle = NCD_NormalizeBool01(g_NCD_Cfg.Player_NoDamageAfterJumpFromVehicle, defaults.Player_NoDamageAfterJumpFromVehicle);
+	
+	if (g_NCD_Cfg.Player_NoDamageAfterJump_MinSpeedKmh < 0)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_MinSpeedKmh = 8.0;
+		changed = true;
+	}
+
+	if (g_NCD_Cfg.Player_NoDamageAfterJump_MaxSpeedKmh < -1.0)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_MaxSpeedKmh = -1.0;
+		changed = true;
+	}
+
+	if (g_NCD_Cfg.Vehicle_DisableCrash_MaxSpeedKmh < -1.0)
+	{
+		g_NCD_Cfg.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+		changed = true;
+	}
+
+	if (g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS < 0)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS = 0;
+		changed = true;
+	}
+	else if (g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS > 10000)
+	{
+		g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS = 10000;
+		changed = true;
+	}
+
+	if (g_NCD_Cfg.Protect_PlayerClothingInVehicle < 0 || g_NCD_Cfg.Protect_PlayerClothingInVehicle > 1)
+	{
+		g_NCD_Cfg.Protect_PlayerClothingInVehicle = 1;
+		changed = true;
+	}
 
 	g_NCD_Cfg.Protect_AttachmentsOnVehicle = NCD_NormalizeBool01(g_NCD_Cfg.Protect_AttachmentsOnVehicle, defaults.Protect_AttachmentsOnVehicle);
 	g_NCD_Cfg.EnableVehicleOverrides = NCD_NormalizeBool01(g_NCD_Cfg.EnableVehicleOverrides, defaults.EnableVehicleOverrides);
@@ -601,6 +718,8 @@ bool NCD_BackfillMissingConfigKeys()
 		if (!hasExpansionAINoJumpDmg) ov.ExpansionAI_NoDamageAfterJumpFromVehicle = -1;
 		if (!hasCrewCrash) ov.Vehicle_BlockCrewCrashDamage = -1;
 		if (!hasCrashSounds) ov.Vehicle_EnableCrashSounds = -1;
+		if (!hasMaxSpeed) ov.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+		if (!hasProtectClothing) ov.Protect_PlayerClothingInVehicle = -1;
 
 		ov.Vehicle_BlockBullets = NCD_NormalizeTriState(ov.Vehicle_BlockBullets, -1);
 		ov.Vehicle_BlockExplosions = NCD_NormalizeTriState(ov.Vehicle_BlockExplosions, -1);
@@ -617,6 +736,18 @@ bool NCD_BackfillMissingConfigKeys()
 		ov.Vehicle_NoDamageToPlayers = NCD_NormalizeTriState(ov.Vehicle_NoDamageToPlayers, -1);
 		ov.Vehicle_NoDamageToExpansionAI = NCD_NormalizeTriState(ov.Vehicle_NoDamageToExpansionAI, -1);
 		ov.Vehicle_AutoFlip = NCD_NormalizeTriState(ov.Vehicle_AutoFlip, -1);
+		if (!hasMaxSpeed) ov.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+		if (ov.Vehicle_DisableCrash_MaxSpeedKmh < -1.0)
+		{
+			ov.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+			changed = true;
+		}
+		if (!hasProtectClothing) ov.Protect_PlayerClothingInVehicle = -1;
+		if (ov.Protect_PlayerClothingInVehicle < -1 || ov.Protect_PlayerClothingInVehicle > 1)
+		{
+			ov.Protect_PlayerClothingInVehicle = -1;
+			changed = true;
+		}
 
 		ov.Player_BlockContaminatedWhileInVehicle = NCD_NormalizeTriState(ov.Player_BlockContaminatedWhileInVehicle, -1);
 		ov.Player_DoorOpenDisablesProtectionInContaminated = NCD_NormalizeTriState(ov.Player_DoorOpenDisablesProtectionInContaminated, -1);
@@ -627,6 +758,7 @@ bool NCD_BackfillMissingConfigKeys()
 		ov.Player_BlockMeleeWhileInVehicle = NCD_NormalizeTriState(ov.Player_BlockMeleeWhileInVehicle, -1);
 
 		ov.Protect_AttachmentsOnVehicle = NCD_NormalizeTriState(ov.Protect_AttachmentsOnVehicle, -1);
+		if (!hasProtectClothing) ov.Protect_PlayerClothingInVehicle = -1;
 
 		ov.ExpansionAI_NoDamageWhileInVehicle = NCD_NormalizeTriState(ov.ExpansionAI_NoDamageWhileInVehicle, -1);
 		ov.ExpansionAI_BlockAllDamageWhileInVehicle = NCD_NormalizeTriState(ov.ExpansionAI_BlockAllDamageWhileInVehicle, -1);
@@ -636,6 +768,9 @@ bool NCD_BackfillMissingConfigKeys()
 		ov.ExpansionAI_BlockContaminatedWhileInVehicle = NCD_NormalizeTriState(ov.ExpansionAI_BlockContaminatedWhileInVehicle, -1);
 		ov.ExpansionAI_DoorOpenDisablesProtectionInContaminated = NCD_NormalizeTriState(ov.ExpansionAI_DoorOpenDisablesProtectionInContaminated, -1);
 		ov.ExpansionAI_NoDamageAfterJumpFromVehicle = NCD_NormalizeTriState(ov.ExpansionAI_NoDamageAfterJumpFromVehicle, -1);
+		
+		if (ov.Vehicle_DisableCrash_MaxSpeedKmh < -1.0) ov.Vehicle_DisableCrash_MaxSpeedKmh = -1.0;
+		if (ov.Protect_PlayerClothingInVehicle < -1 || ov.Protect_PlayerClothingInVehicle > 1) ov.Protect_PlayerClothingInVehicle = -1;
 	}
 
 	return changed;
@@ -807,6 +942,7 @@ void NCD_LogConfigLoaded(bool created)
 	v += " melee=" + g_NCD_Cfg.Vehicle_BlockMelee.ToString();
 	v += " glassDamage=" + g_NCD_Cfg.Vehicle_AllowGlassDamage.ToString();
 	v += " crashDisabled=" + g_NCD_Cfg.Vehicle_DisableCrashDamage.ToString();
+	v += " crashMaxKmh=" + g_NCD_Cfg.Vehicle_DisableCrash_MaxSpeedKmh.ToString();
 	v += " waterDisabled=" + g_NCD_Cfg.Vehicle_DisableWaterDamage.ToString();
 	v += " redlineDisabled=" + g_NCD_Cfg.Vehicle_DisableRedlineDamage.ToString();
 	v += " crewCrashBlock=" + g_NCD_Cfg.Vehicle_BlockCrewCrashDamage.ToString();
@@ -818,6 +954,7 @@ void NCD_LogConfigLoaded(bool created)
 	v += " noDmgPlayers=" + g_NCD_Cfg.Vehicle_NoDamageToPlayers.ToString();
 	v += " noDmgExpansionAI=" + g_NCD_Cfg.Vehicle_NoDamageToExpansionAI.ToString();
 	v += " toxic=" + g_NCD_Cfg.Vehicle_BlockContaminated.ToString();
+	v += " protectClothing=" + g_NCD_Cfg.Protect_PlayerClothingInVehicle.ToString();
 	Print(v);
 
 	string p = "[NoCarDamage] Player in Vehicle: enabled=" + g_NCD_Cfg.Player_NoDamageWhileInVehicle.ToString();
@@ -828,6 +965,10 @@ void NCD_LogConfigLoaded(bool created)
 	p += " toxic=" + g_NCD_Cfg.Player_BlockContaminatedWhileInVehicle.ToString();
 	p += " doorOpenDisablesInGas=" + g_NCD_Cfg.Player_DoorOpenDisablesProtectionInContaminated.ToString();
 	p += " noJumpDmg=" + g_NCD_Cfg.Player_NoDamageAfterJumpFromVehicle.ToString();
+	p += " noJumpMinKmh=" + g_NCD_Cfg.Player_NoDamageAfterJump_MinSpeedKmh.ToString();
+	p += " noJumpMaxKmh=" + g_NCD_Cfg.Player_NoDamageAfterJump_MaxSpeedKmh.ToString();
+	p += " noJumpWindowMS=" + g_NCD_Cfg.Player_NoDamageAfterJump_WindowMS.ToString();
+	p += " protectClothing=" + g_NCD_Cfg.Protect_PlayerClothingInVehicle.ToString();
 	Print(p);
 
 	string a = "[NoCarDamage] ExpansionAI in Vehicle: enabled=" + g_NCD_Cfg.ExpansionAI_NoDamageWhileInVehicle.ToString();
@@ -941,6 +1082,10 @@ NCD_ResolvedVehicleRules NCD_GetResolvedVehicleRules(string vt)
 		rules.Vehicle_NoDamageToPlayers = NCD_ResolveInt(ov.Vehicle_NoDamageToPlayers, cfg.Vehicle_NoDamageToPlayers);
 		rules.Vehicle_NoDamageToExpansionAI = NCD_ResolveInt(ov.Vehicle_NoDamageToExpansionAI, cfg.Vehicle_NoDamageToExpansionAI);
 		rules.Vehicle_AutoFlip = NCD_ResolveInt(ov.Vehicle_AutoFlip, cfg.Vehicle_AutoFlip);
+		if (ov.Vehicle_DisableCrash_MaxSpeedKmh != -1.0)
+			rules.Vehicle_DisableCrash_MaxSpeedKmh = ov.Vehicle_DisableCrash_MaxSpeedKmh;
+		else
+			rules.Vehicle_DisableCrash_MaxSpeedKmh = cfg.Vehicle_DisableCrash_MaxSpeedKmh;
 
 		rules.Player_NoDamageWhileInVehicle = NCD_ResolveInt(ov.Player_NoDamageWhileInVehicle, cfg.Player_NoDamageWhileInVehicle);
 		rules.Player_BlockAllDamageWhileInVehicle = NCD_ResolveInt(ov.Player_BlockAllDamageWhileInVehicle, cfg.Player_BlockAllDamageWhileInVehicle);
@@ -959,6 +1104,7 @@ NCD_ResolvedVehicleRules NCD_GetResolvedVehicleRules(string vt)
 		rules.ExpansionAI_DoorOpenDisablesProtectionInContaminated = NCD_ResolveInt(ov.ExpansionAI_DoorOpenDisablesProtectionInContaminated, cfg.ExpansionAI_DoorOpenDisablesProtectionInContaminated);
 
 		rules.Protect_AttachmentsOnVehicle = NCD_ResolveInt(ov.Protect_AttachmentsOnVehicle, cfg.Protect_AttachmentsOnVehicle);
+		rules.Protect_PlayerClothingInVehicle = NCD_ResolveInt(ov.Protect_PlayerClothingInVehicle, cfg.Protect_PlayerClothingInVehicle);
 	}
 	else
 	{
@@ -977,6 +1123,7 @@ NCD_ResolvedVehicleRules NCD_GetResolvedVehicleRules(string vt)
 		rules.Vehicle_NoDamageToPlayers = cfg.Vehicle_NoDamageToPlayers;
 		rules.Vehicle_NoDamageToExpansionAI = cfg.Vehicle_NoDamageToExpansionAI;
 		rules.Vehicle_AutoFlip = cfg.Vehicle_AutoFlip;
+		rules.Vehicle_DisableCrash_MaxSpeedKmh = cfg.Vehicle_DisableCrash_MaxSpeedKmh;
 
 		rules.Player_NoDamageWhileInVehicle = cfg.Player_NoDamageWhileInVehicle;
 		rules.Player_BlockAllDamageWhileInVehicle = cfg.Player_BlockAllDamageWhileInVehicle;
@@ -995,6 +1142,7 @@ NCD_ResolvedVehicleRules NCD_GetResolvedVehicleRules(string vt)
 		rules.ExpansionAI_DoorOpenDisablesProtectionInContaminated = cfg.ExpansionAI_DoorOpenDisablesProtectionInContaminated;
 
 		rules.Protect_AttachmentsOnVehicle = cfg.Protect_AttachmentsOnVehicle;
+		rules.Protect_PlayerClothingInVehicle = cfg.Protect_PlayerClothingInVehicle;
 	}
 
 	g_NCD_ResolvedRulesMap.Set(vt, rules);
@@ -1252,6 +1400,14 @@ int NCD_Eff_ProtectAttachments(string vt)
 	return cfg.Protect_AttachmentsOnVehicle;
 }
 
+int NCD_Eff_Protect_PlayerClothingInVehicle(string vt)
+{
+	NCD_ResolvedVehicleRules r = NCD_GetResolvedVehicleRules(vt);
+	if (r) return r.Protect_PlayerClothingInVehicle;
+	NCD_Config cfg = NCD_Cfg(); if (!cfg) return 0;
+	return cfg.Protect_PlayerClothingInVehicle;
+}
+
 int NCD_Eff_Player_NoDamageAfterJumpFromVehicle()
 {
 	NCD_Config cfg = NCD_Cfg(); if (!cfg) return 0;
@@ -1379,4 +1535,270 @@ void NCD_ScanVehiclesAndExtendConfig()
 	{
 		Print("[NoCarDamage] Vehicle scan: no new entries");
 	}
+}
+
+static ref array<EntityAI> g_NCD_BypassedEntities;
+static ref array<Transport> g_NCD_ActiveTransports;
+
+void NCD_RegisterTransport(Transport t)
+{
+	if (!t) return;
+	if (!g_NCD_ActiveTransports)
+		g_NCD_ActiveTransports = new array<Transport>();
+	
+	if (g_NCD_ActiveTransports.Find(t) == -1)
+		g_NCD_ActiveTransports.Insert(t);
+}
+
+void NCD_UnregisterTransport(Transport t)
+{
+	if (!t || !g_NCD_ActiveTransports)
+		return;
+	
+	int idx = g_NCD_ActiveTransports.Find(t);
+	if (idx != -1)
+		g_NCD_ActiveTransports.Remove(idx);
+}
+
+bool NCD_IsEntityProtectionBypassed(EntityAI e)
+{
+	if (!e) return false;
+	return NoCarDamageAPI.IsEntityBypassed(e);
+}
+
+float NCD_GetVehicleSpeedKmh(Transport t)
+{
+	if (!t) return 0.0;
+	
+	vector vel = GetVelocity(t);
+	return vel.Length() * 3.6;
+}
+
+void NCD_UpdatePreCrashSpeedCache(Transport t)
+{
+	if (!t || !g_Game) return;
+	
+	int key = t.GetID();
+	if (key <= 0) return;
+	
+	int nowMS = g_Game.GetTime();
+	
+	if (!g_NCD_PreCrashSpeedCache)
+		g_NCD_PreCrashSpeedCache = new map<int, ref array<float>>();
+	if (!g_NCD_PreCrashCacheTime)
+		g_NCD_PreCrashCacheTime = new map<int, int>();
+	
+	ref array<float> speeds;
+	if (!g_NCD_PreCrashSpeedCache.Find(key, speeds))
+	{
+		speeds = new array<float>();
+		g_NCD_PreCrashSpeedCache.Set(key, speeds);
+	}
+	
+	float currentSpeedKmh = NCD_GetVehicleSpeedKmh(t);
+	speeds.Insert(currentSpeedKmh);
+	
+	while (speeds.Count() > 20)
+		speeds.Remove(0);
+	
+	g_NCD_PreCrashCacheTime.Set(key, nowMS);
+}
+
+float NCD_GetRecentVehicleCrashSpeedKmh(Transport t)
+{
+	if (!t) return 0.0;
+	
+	int key = t.GetID();
+	if (key <= 0)
+		return NCD_GetVehicleSpeedKmh(t);
+	
+	if (!g_NCD_PreCrashSpeedCache)
+		return NCD_GetVehicleSpeedKmh(t);
+	
+	ref array<float> speeds;
+	if (!g_NCD_PreCrashSpeedCache.Find(key, speeds))
+		return NCD_GetVehicleSpeedKmh(t);
+	
+	if (speeds.Count() == 0)
+		return NCD_GetVehicleSpeedKmh(t);
+	
+	float maxSpeed = 0.0;
+	for (int i = 0; i < speeds.Count(); i++)
+	{
+		if (speeds[i] > maxSpeed)
+			maxSpeed = speeds[i];
+	}
+	
+	return maxSpeed;
+}
+
+void NCD_InvalidateVehicleRuntimeFlags(Transport t)
+{
+	// No-op: CarScript/BoatScript/HelicopterScript types are from mods and not available at compile time.
+	// This means config reloads via NoCarDamageAPI.ReloadConfig() will NOT update runtime flags on already-spawned vehicles.
+	// Vehicles must be deleted and recreated to pick up new config values for:
+	// - DisableCrashDamage, DisableWaterDamage, AutoFlip, etc.
+	// Jump-out protection uses global config and works immediately on reload.
+	return;
+}
+
+void NCD_CleanupPreCrashCache()
+{
+	if (!g_NCD_PreCrashSpeedCache || !g_NCD_PreCrashCacheTime)
+		return;
+	
+	if (!g_Game) return;
+	
+	int nowMS = g_Game.GetTime();
+	ref array<int> toRemove = new array<int>();
+	
+	for (int i = 0; i < g_NCD_PreCrashCacheTime.Count(); i++)
+	{
+		int key = g_NCD_PreCrashCacheTime.GetKey(i);
+		int lastTime = g_NCD_PreCrashCacheTime.GetElement(i);
+		
+		if ((nowMS - lastTime) > NCD_PRECRASH_CACHE_MS * 2)
+			toRemove.Insert(key);
+	}
+	
+	for (int j = 0; j < toRemove.Count(); j++)
+	{
+		int removeKey = toRemove[j];
+		g_NCD_PreCrashSpeedCache.Remove(removeKey);
+		g_NCD_PreCrashCacheTime.Remove(removeKey);
+	}
+}
+
+class NoCarDamageAPI
+{
+	static bool IsActive()
+	{
+		return true;
+	}
+
+	static NCD_Config GetConfig()
+	{
+		return NCD_Cfg();
+	}
+
+	static NCD_ResolvedVehicleRules GetVehicleRules(string vehicleType)
+	{
+		return NCD_GetResolvedVehicleRules(vehicleType);
+	}
+
+	static void ReloadConfig()
+	{
+		if (!g_Game || !g_Game.IsServer())
+		{
+			Error("[NoCarDamageAPI] ReloadConfig() can only be called on server");
+			return;
+		}
+		
+		g_NCD_CfgDiskLoaded = false;
+		
+		if (g_NCD_ResolvedRulesMap)
+			g_NCD_ResolvedRulesMap.Clear();
+		
+		if (g_NCD_OverrideMap)
+			g_NCD_OverrideMap.Clear();
+		
+		if (g_NCD_PreCrashSpeedCache)
+			g_NCD_PreCrashSpeedCache.Clear();
+		if (g_NCD_PreCrashCacheTime)
+			g_NCD_PreCrashCacheTime.Clear();
+		
+		g_NCD_ExpansionVehiclesState = -1;
+		g_NCD_ExpansionDisableVehicleDamageState = -1;
+		
+		NCD_LoadConfigFromDisk();
+		
+		if (g_NCD_ActiveTransports)
+		{
+			for (int i = 0; i < g_NCD_ActiveTransports.Count(); i++)
+			{
+				Transport t = g_NCD_ActiveTransports[i];
+				if (t)
+					NCD_InvalidateVehicleRuntimeFlags(t);
+			}
+		}
+	}
+
+	static void AddBypass(EntityAI entity)
+	{
+		if (!entity) return;
+		if (!g_Game || !g_Game.IsServer())
+		{
+			Error("[NoCarDamageAPI] AddBypass() can only be called on server. Entity: " + entity.GetType());
+			return;
+		}
+		if (!g_NCD_BypassedEntities) g_NCD_BypassedEntities = new array<EntityAI>();
+		if (g_NCD_BypassedEntities.Find(entity) == -1)
+			g_NCD_BypassedEntities.Insert(entity);
+	}
+
+	static void RemoveBypass(EntityAI entity)
+	{
+		if (!entity || !g_NCD_BypassedEntities) return;
+		if (!g_Game || !g_Game.IsServer())
+		{
+			Error("[NoCarDamageAPI] RemoveBypass() can only be called on server. Entity: " + entity.GetType());
+			return;
+		}
+		int idx = g_NCD_BypassedEntities.Find(entity);
+		if (idx != -1)
+			g_NCD_BypassedEntities.Remove(idx);
+	}
+
+	static bool IsEntityBypassed(EntityAI entity)
+	{
+		if (!entity || !g_NCD_BypassedEntities) return false;
+		return (g_NCD_BypassedEntities.Find(entity) != -1);
+	}
+}
+
+float NCD_Eff_Vehicle_DisableCrash_MaxSpeedKmh(string vt)
+{
+    NCD_ResolvedVehicleRules r = NCD_GetResolvedVehicleRules(vt);
+    if (r) return r.Vehicle_DisableCrash_MaxSpeedKmh;
+    NCD_Config cfg = NCD_Cfg(); if (!cfg) return -1.0;
+    return cfg.Vehicle_DisableCrash_MaxSpeedKmh;
+}
+
+float NCD_GetJumpOutSpeedKmh(float carSpeed)
+{
+	return carSpeed;
+}
+
+bool NCD_IsAttachmentCustomCrashDamage(string ammo)
+{
+	if (ammo == "") return true;
+	string am = ammo;
+	am.ToLower();
+
+	if (am.IndexOf("crash") != -1) return true;
+	if (am.IndexOf("enviro") != -1) return true;
+	if (am.IndexOf("vehicle") != -1) return true;
+	if (am.IndexOf("collision") != -1) return true;
+	if (am.IndexOf("transport") != -1) return true;
+
+	return false;
+}
+
+bool NCD_IsCrashProtectionActive(Transport t, string vt)
+{
+	if (!t) return false;
+	if (vt == "") return false;
+
+	if (NCD_IsEntityProtectionBypassed(t))
+		return false;
+
+	if (NCD_Eff_Vehicle_DisableCrash(vt) != 1)
+		return false;
+
+	float maxKmh = NCD_Eff_Vehicle_DisableCrash_MaxSpeedKmh(vt);
+	if (maxKmh < 0)
+		return true;
+
+	float crashSpeedKmh = NCD_GetRecentVehicleCrashSpeedKmh(t);
+	return crashSpeedKmh <= maxKmh;
 }

@@ -44,7 +44,16 @@ bool NCD_IsHumanPlayer(PlayerBase player)
 
 bool NCD_IsExpansionAI(PlayerBase player)
 {
-	return (player && player.IsKindOf("eAIBase"));
+	if (!player) return false;
+	
+	if (player.IsKindOf("eAIBase")) return true;
+
+	string scriptCls = player.ClassName();
+	scriptCls.ToLower();
+	if (scriptCls.IndexOf("eaibase") != -1 || scriptCls.IndexOf("expansionai") != -1 || scriptCls == "eai")
+		return true;
+
+	return false;
 }
 
 static const int NCD_PLAYER_KIND_NONE = 0;
@@ -186,6 +195,60 @@ bool NCD_ShouldSuppressContaminatedAreaForPlayer(PlayerBase player, Transport t)
 		doorRule = NCD_IsAnyDoorOpen(t);
 
 	return !doorRule;
+}
+
+bool NCD_ShouldBlockCrewCrashDamage(Transport t, string vt)
+{
+	if (!t)
+		return false;
+
+	if (vt == "")
+		vt = t.GetType();
+
+	if (vt == "")
+		return false;
+
+	if (NCD_IsEntityProtectionBypassed(t))
+		return false;
+
+	if (NCD_Eff_Vehicle_BlockCrewCrashDamage(vt) != 1)
+		return false;
+
+	return NCD_IsCrashProtectionActive(t, vt);
+}
+
+bool NCD_ShouldBlockOccupantCrashDamage(PlayerBase player, int damageType, string ammo)
+{
+	if (!player || damageType != DamageType.CUSTOM)
+		return false;
+
+	if (!NCD_IsAttachmentCustomCrashDamage(ammo))
+		return false;
+
+	Transport t = NCD_GetPlayerTransport(player);
+	if (!t)
+		return false;
+
+	return NCD_ShouldBlockCrewCrashDamage(t, t.GetType());
+}
+
+bool NCD_IsVehicleRootEntity(EntityAI root)
+{
+	if (!root)
+		return false;
+
+	if (root.IsKindOf("Transport") || root.IsKindOf("CarScript") || root.IsKindOf("BoatScript") || root.IsKindOf("HelicopterScript"))
+		return true;
+
+	if (root.IsKindOf("ExpansionVehicleBase") || root.IsKindOf("ExpansionVehicleHelicopterBase") || root.IsKindOf("ExpansionHelicopterScript"))
+		return true;
+
+	string cls = root.ClassName();
+	cls.ToLower();
+	if (cls.IndexOf("expansionvehicle") != -1 || cls.IndexOf("expansionhelicopter") != -1)
+		return true;
+
+	return false;
 }
 
 string NCD_PlayerKey(PlayerBase p)
@@ -362,7 +425,7 @@ void NCD_FlipTransportUpright(Transport t)
 	ori[2] = 0;
 
 	vector pos = t.GetPosition();
-	pos[1] = pos[1] + 0.5;
+	pos[1] = pos[1] + 1.0;
 
 	t.SetPosition(pos);
 	t.SetOrientation(ori);
@@ -387,6 +450,17 @@ modded class CarScript
 	protected bool m_NCD_UseExpansionCrashWaterPath = false;
 	protected string m_NCD_VehicleTypeCached = "";
 
+	override void EEDelete(EntityAI parent)
+	{
+		if (g_Game && g_Game.IsServer())
+		{
+			NoCarDamageAPI.RemoveBypass(this);
+			NCD_UnregisterTransport(this);
+		}
+
+		super.EEDelete(parent);
+	}
+
 	protected string NCD_GetVehicleTypeCached()
 	{
 		if (m_NCD_VehicleTypeCached == "")
@@ -405,6 +479,18 @@ modded class CarScript
 		if (!g_Game || !g_Game.IsServer())
 			return;
 
+		if (NCD_IsEntityProtectionBypassed(this))
+		{
+			m_NCD_DoWaterProtection = false;
+			m_NCD_DoPassiveAutoFlip = false;
+			m_NCD_DoCrashDisable = false;
+			m_NCD_DoCrashSounds = false;
+			m_NCD_DoCrewCrashBlock = false;
+			m_NCD_UseExpansionCrashWaterPath = false;
+			m_NCD_HasRuntimeWork = false;
+			return;
+		}
+
 		string vt = NCD_GetVehicleTypeCached();
 		m_NCD_DoWaterProtection = (NCD_Eff_Vehicle_DisableWater(vt) == 1);
 		m_NCD_DoPassiveAutoFlip = (NCD_Eff_Vehicle_AutoFlip(vt) == 1 && NCD_AutoFlipButtonEnabled() == 0);
@@ -422,17 +508,27 @@ modded class CarScript
 		m_NCD_HasRuntimeWork = (m_NCD_DoWaterProtection || m_NCD_DoPassiveAutoFlip);
 	}
 
+	void NCD_ResetRuntimeFlags()
+	{
+		m_NCD_RuntimeFlagsInit = false;
+	}
+
 	override void OnVehicleJumpOutServer(GetOutTransportActionData gotActionData)
 	{
 		PlayerBase jumpOutPlayer = null;
 		if (gotActionData)
 		{
 			jumpOutPlayer = PlayerBase.Cast(gotActionData.m_Player);
-			if (jumpOutPlayer)
-				jumpOutPlayer.NCD_ArmNoJumpDamageWindow(gotActionData.m_CarSpeed);
+			if (jumpOutPlayer && !NCD_IsEntityProtectionBypassed(this) && !NCD_IsEntityProtectionBypassed(jumpOutPlayer) && NCD_ShouldProtectJumpOutForPlayer(jumpOutPlayer))
+			{
+				if (jumpOutPlayer.NCD_ArmNoJumpDamageWindowKmh(NCD_GetVehicleSpeedKmh(this)))
+					return;
+			}
 		}
 
 		super.OnVehicleJumpOutServer(gotActionData);
+		if (jumpOutPlayer)
+			jumpOutPlayer.NCD_MarkJumpOutVehicleDamageHandled();
 	}
 
 	override void OnAnimationPhaseStarted(string animSource, float phase)
@@ -445,6 +541,9 @@ modded class CarScript
 
 	override bool EEOnDamageCalculated(TotalDamageResult damageResult, int damageType, EntityAI source, int component, string dmgZone, string ammo, vector modelPos, float speedCoef)
 	{
+		if (NCD_IsEntityProtectionBypassed(this))
+			return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
 		string vt = NCD_GetVehicleTypeCached();
 
 		if (damageType == DamageType.CUSTOM && ammo != "" && dmgZone == "Engine")
@@ -477,7 +576,7 @@ modded class CarScript
 	override void CheckContactCache()
 	{
 		NCD_InitRuntimeFlags();
-		if (m_NCD_DoCrashDisable)
+		if (m_NCD_DoCrashDisable && NCD_IsCrashProtectionActive(this, NCD_GetVehicleTypeCached()))
 		{
 			if (g_Game)
 			{
@@ -515,7 +614,7 @@ modded class CarScript
 	override void SynchCrashLightSound(bool play)
 	{
 		NCD_InitRuntimeFlags();
-		if (!m_NCD_DoCrashSounds)
+		if (!m_NCD_DoCrashSounds && NCD_IsCrashProtectionActive(this, NCD_GetVehicleTypeCached()))
 			return;
 		super.SynchCrashLightSound(play);
 	}
@@ -523,7 +622,7 @@ modded class CarScript
 	override void SynchCrashHeavySound(bool play)
 	{
 		NCD_InitRuntimeFlags();
-		if (!m_NCD_DoCrashSounds)
+		if (!m_NCD_DoCrashSounds && NCD_IsCrashProtectionActive(this, NCD_GetVehicleTypeCached()))
 			return;
 		super.SynchCrashHeavySound(play);
 	}
@@ -531,7 +630,7 @@ modded class CarScript
 	override void DamageCrew(float dmg)
 	{
 		NCD_InitRuntimeFlags();
-		if (m_NCD_DoCrashDisable && m_NCD_DoCrewCrashBlock)
+		if (m_NCD_DoCrewCrashBlock && NCD_ShouldBlockCrewCrashDamage(this, NCD_GetVehicleTypeCached()))
 			return;
 
 		super.DamageCrew(dmg);
@@ -540,6 +639,12 @@ modded class CarScript
 	override void OnUpdate(float dt)
 	{
 		NCD_InitRuntimeFlags();
+
+		if (g_Game && g_Game.IsServer())
+		{
+			NCD_UpdatePreCrashSpeedCache(this);
+			NCD_RegisterTransport(this);
+		}
 
 		if (!g_Game || !g_Game.IsServer() || !m_NCD_HasRuntimeWork)
 		{
@@ -607,20 +712,247 @@ modded class CarScript
 
 modded class BoatScript
 {
-	override void OnVehicleJumpOutServer(GetOutTransportActionData data)
+	protected float m_NCD_AutoFlipTimer = 0;
+	protected bool m_NCD_RuntimeFlagsInit = false;
+	protected bool m_NCD_DoPassiveAutoFlip = false;
+	protected bool m_NCD_DoCrashDisable = false;
+	protected string m_NCD_VehicleTypeCached = "";
+
+	override void EEDelete(EntityAI parent)
 	{
-		PlayerBase jumpOutPlayer = null;
-		if (data)
+		if (g_Game && g_Game.IsServer())
 		{
-			jumpOutPlayer = PlayerBase.Cast(data.m_Player);
-			if (jumpOutPlayer)
-				jumpOutPlayer.NCD_ArmNoJumpDamageWindow(data.m_CarSpeed);
+			NoCarDamageAPI.RemoveBypass(this);
+			NCD_UnregisterTransport(this);
 		}
 
-		super.OnVehicleJumpOutServer(data);
+		super.EEDelete(parent);
+	}
+
+	protected string NCD_GetVehicleTypeCached()
+	{
+		if (m_NCD_VehicleTypeCached == "")
+			m_NCD_VehicleTypeCached = GetType();
+		return m_NCD_VehicleTypeCached;
+	}
+
+	protected void NCD_InitRuntimeFlags()
+	{
+		if (m_NCD_RuntimeFlagsInit)
+			return;
+
+		m_NCD_RuntimeFlagsInit = true;
+
+		if (!g_Game || !g_Game.IsServer())
+			return;
+
+		if (NCD_IsEntityProtectionBypassed(this))
+		{
+			m_NCD_DoPassiveAutoFlip = false;
+			m_NCD_DoCrashDisable = false;
+			return;
+		}
+
+		string vt = NCD_GetVehicleTypeCached();
+		m_NCD_DoPassiveAutoFlip = (NCD_Eff_Vehicle_AutoFlip(vt) == 1 && NCD_AutoFlipButtonEnabled() == 0);
+		m_NCD_DoCrashDisable = (NCD_Eff_Vehicle_DisableCrash(vt) == 1);
+	}
+
+	void NCD_ResetRuntimeFlags()
+	{
+		m_NCD_RuntimeFlagsInit = false;
+	}
+
+	override void OnUpdate(float dt)
+	{
+		NCD_InitRuntimeFlags();
+
+		if (g_Game && g_Game.IsServer())
+		{
+			NCD_UpdatePreCrashSpeedCache(this);
+			NCD_RegisterTransport(this);
+		}
+
+		if (g_Game && g_Game.IsServer() && m_NCD_DoPassiveAutoFlip)
+		{
+			if (CrewSize() == 0)
+			{
+				m_NCD_AutoFlipTimer = 0;
+			}
+			else
+			{
+				m_NCD_AutoFlipTimer += dt;
+				if (m_NCD_AutoFlipTimer >= 5.0)
+				{
+					m_NCD_AutoFlipTimer = 0;
+					
+					vector vel = GetVelocity(this);
+					if (vel.Length() < 1.0 && NCD_IsTransportFlipped(this))
+						NCD_FlipTransportUpright(this);
+				}
+			}
+		}
+		
+		super.OnUpdate(dt);
+	}
+
+	override bool EEOnDamageCalculated(TotalDamageResult damageResult, int damageType, EntityAI source, int component, string dmgZone, string ammo, vector modelPos, float speedCoef)
+	{
+		if (NCD_IsEntityProtectionBypassed(this))
+			return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
+		string vt = NCD_GetVehicleTypeCached();
+
+		if (NCD_IsCrashProtectionActive(this, vt) && damageType == DamageType.CUSTOM)
+		{
+			string am = ammo;
+			am.ToLower();
+			if (am == "" || am.IndexOf("crash") != -1 || am.IndexOf("enviro") != -1)
+				return false;
+		}
+
+		if (NCD_Eff_Vehicle_BlockContaminated(vt) == 1 && NCD_IsToxicAmmo(ammo))
+			return false;
+
+		if (damageType == DamageType.FIRE_ARM && NCD_Eff_Vehicle_BlockBullets(vt) == 1)
+		{
+			if (NCD_Eff_Vehicle_AllowGlassDamage(vt) == 1 && NCD_IsGlassZone(dmgZone))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+			return false;
+		}
+
+		if (damageType == DamageType.EXPLOSION && NCD_Eff_Vehicle_BlockExplosions(vt) == 1) return false;
+		if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Vehicle_BlockMelee(vt) == 1) return false;
+
+		return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
 	}
 };
 
+modded class HelicopterScript
+{
+	protected float m_NCD_AutoFlipTimer = 0;
+	protected bool m_NCD_RuntimeFlagsInit = false;
+	protected bool m_NCD_DoPassiveAutoFlip = false;
+	protected bool m_NCD_DoCrashDisable = false;
+	protected string m_NCD_VehicleTypeCached = "";
+
+	override void EEDelete(EntityAI parent)
+	{
+		if (g_Game && g_Game.IsServer())
+		{
+			NoCarDamageAPI.RemoveBypass(this);
+			NCD_UnregisterTransport(this);
+		}
+
+		super.EEDelete(parent);
+	}
+
+	protected string NCD_GetVehicleTypeCached()
+	{
+		if (m_NCD_VehicleTypeCached == "")
+			m_NCD_VehicleTypeCached = GetType();
+		return m_NCD_VehicleTypeCached;
+	}
+
+	protected void NCD_InitRuntimeFlags()
+	{
+		if (m_NCD_RuntimeFlagsInit)
+			return;
+
+		m_NCD_RuntimeFlagsInit = true;
+
+		if (!g_Game || !g_Game.IsServer())
+			return;
+
+		if (NCD_IsEntityProtectionBypassed(this))
+		{
+			m_NCD_DoPassiveAutoFlip = false;
+			m_NCD_DoCrashDisable = false;
+			return;
+		}
+
+		string vt = NCD_GetVehicleTypeCached();
+		m_NCD_DoPassiveAutoFlip = (NCD_Eff_Vehicle_AutoFlip(vt) == 1 && NCD_AutoFlipButtonEnabled() == 0);
+		m_NCD_DoCrashDisable = (NCD_Eff_Vehicle_DisableCrash(vt) == 1);
+	}
+
+	void NCD_ResetRuntimeFlags()
+	{
+		m_NCD_RuntimeFlagsInit = false;
+	}
+
+	override void OnUpdate(float dt)
+	{
+		NCD_InitRuntimeFlags();
+
+		if (g_Game && g_Game.IsServer())
+		{
+			NCD_UpdatePreCrashSpeedCache(this);
+			NCD_RegisterTransport(this);
+		}
+
+		if (g_Game && g_Game.IsServer() && m_NCD_DoPassiveAutoFlip)
+		{
+			if (CrewSize() == 0)
+			{
+				m_NCD_AutoFlipTimer = 0;
+			}
+			else
+			{
+				m_NCD_AutoFlipTimer += dt;
+				if (m_NCD_AutoFlipTimer >= 5.0)
+				{
+					m_NCD_AutoFlipTimer = 0;
+					
+					vector vel = GetVelocity(this);
+					if (vel.Length() < 1.0 && NCD_IsTransportFlipped(this))
+						NCD_FlipTransportUpright(this);
+				}
+			}
+		}
+		
+		super.OnUpdate(dt);
+	}
+
+	override bool EEOnDamageCalculated(TotalDamageResult damageResult, int damageType, EntityAI source, int component, string dmgZone, string ammo, vector modelPos, float speedCoef)
+	{
+		if (NCD_IsEntityProtectionBypassed(this))
+			return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
+		string vt = NCD_GetVehicleTypeCached();
+
+		if (NCD_IsCrashProtectionActive(this, vt))
+		{
+			string dz = dmgZone;
+			dz.ToLower();
+			if (dz.IndexOf("rotor") != -1)
+				return false;
+				
+			if (damageType == DamageType.CUSTOM)
+			{
+				string am = ammo;
+				am.ToLower();
+				if (am == "" || am.IndexOf("crash") != -1 || am.IndexOf("enviro") != -1)
+					return false;
+			}
+		}
+
+		if (NCD_Eff_Vehicle_BlockContaminated(vt) == 1 && NCD_IsToxicAmmo(ammo))
+			return false;
+
+		if (damageType == DamageType.FIRE_ARM && NCD_Eff_Vehicle_BlockBullets(vt) == 1)
+		{
+			if (NCD_Eff_Vehicle_AllowGlassDamage(vt) == 1 && NCD_IsGlassZone(dmgZone))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+			return false;
+		}
+
+		if (damageType == DamageType.EXPLOSION && NCD_Eff_Vehicle_BlockExplosions(vt) == 1) return false;
+		if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Vehicle_BlockMelee(vt) == 1) return false;
+
+		return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+	}
+};
 
 modded class ActionGetOutTransport
 {
@@ -634,19 +966,80 @@ modded class ActionGetOutTransport
 		}
 
 		PlayerBase jumpOutPlayer = PlayerBase.Cast(gotActionData.m_Player);
-		if (!jumpOutPlayer || !NCD_ShouldProtectJumpOutForPlayer(jumpOutPlayer))
+		if (!jumpOutPlayer)
 		{
 			super.OnEndServer(action_data);
 			return;
 		}
 
-		jumpOutPlayer.OnJumpOutVehicleFinish(gotActionData.m_CarSpeed);
-
-		if (gotActionData.m_Car)
+		if (jumpOutPlayer.NCD_IsNoJumpDamageActive())
 		{
-			CarScript car;
-			if (Class.CastTo(car, gotActionData.m_Car))
-				car.ForceUpdateLightsEnd();
+			jumpOutPlayer.OnJumpOutVehicleFinish(gotActionData.m_CarSpeed);
+			if (gotActionData.m_Car)
+			{
+				CarScript activeCar;
+				if (Class.CastTo(activeCar, gotActionData.m_Car))
+					activeCar.ForceUpdateLightsEnd();
+			}
+			return;
+		}
+
+		if (jumpOutPlayer.NCD_ConsumeJumpOutVehicleDamageHandled())
+		{
+			jumpOutPlayer.OnJumpOutVehicleFinish(gotActionData.m_CarSpeed);
+			if (gotActionData.m_Car)
+			{
+				CarScript handledCar;
+				if (Class.CastTo(handledCar, gotActionData.m_Car))
+					handledCar.ForceUpdateLightsEnd();
+			}
+			return;
+		}
+
+		// Check bypasses first
+		if (gotActionData.m_Car && NCD_IsEntityProtectionBypassed(gotActionData.m_Car))
+		{
+			super.OnEndServer(action_data);
+			return;
+		}
+
+		if (NCD_IsEntityProtectionBypassed(jumpOutPlayer))
+		{
+			super.OnEndServer(action_data);
+			return;
+		}
+
+		// Check if jump protection is enabled for this player type
+		if (!NCD_ShouldProtectJumpOutForPlayer(jumpOutPlayer))
+		{
+			super.OnEndServer(action_data);
+			return;
+		}
+
+		// THE DECISION POINT:
+		// NCD_ArmNoJumpDamageWindowKmh() returns true if protection window was armed
+		// Returns false if speed is out of range or protection is disabled
+		float jumpSpeedKmh = NCD_GetJumpOutSpeedKmh(gotActionData.m_CarSpeed);
+		Transport jumpTransport = Transport.Cast(gotActionData.m_Car);
+		if (jumpTransport)
+			jumpSpeedKmh = NCD_GetVehicleSpeedKmh(jumpTransport);
+
+		bool armed = jumpOutPlayer.NCD_ArmNoJumpDamageWindowKmh(jumpSpeedKmh);
+		
+		if (armed)
+		{
+			jumpOutPlayer.OnJumpOutVehicleFinish(gotActionData.m_CarSpeed);
+			if (gotActionData.m_Car)
+			{
+				CarScript car;
+				if (Class.CastTo(car, gotActionData.m_Car))
+					car.ForceUpdateLightsEnd();
+			}
+		}
+		else
+		{
+			// Protection NOT active: apply vanilla jump damage exactly once
+			super.OnEndServer(action_data);
 		}
 	}
 };
@@ -658,19 +1051,93 @@ modded class ItemBase
 		if (damageType != DamageType.FIRE_ARM && damageType != DamageType.EXPLOSION && damageType != DamageType.CLOSE_COMBAT && damageType != DamageType.CUSTOM)
 			return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
 
-		EntityAI root = EntityAI.Cast(GetHierarchyRoot());
-		if (root && (root.IsKindOf("CarScript") || root.IsKindOf("Transport")))
+		PlayerBase itemOwner = null;
+		EntityAI current = this;
+		while (current)
 		{
-			string vt = root.GetType();
-
-			if ((IsKindOf("SparkPlug") || IsKindOf("GlowPlug")) && damageType == DamageType.CUSTOM)
-				return false;
-
-			if (NCD_Eff_ProtectAttachments(vt) == 1)
+			PlayerBase pb = PlayerBase.Cast(current);
+			if (pb)
 			{
-				if (damageType == DamageType.FIRE_ARM && NCD_Eff_Vehicle_BlockBullets(vt) == 1) return false;
-				if (damageType == DamageType.EXPLOSION && NCD_Eff_Vehicle_BlockExplosions(vt) == 1) return false;
-				if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Vehicle_BlockMelee(vt) == 1) return false;
+				itemOwner = pb;
+				break;
+			}
+			current = current.GetHierarchyParent();
+		}
+
+		if (itemOwner)
+		{
+			if (NCD_IsEntityProtectionBypassed(itemOwner))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+			
+			Transport t = NCD_GetPlayerTransport(itemOwner);
+			if (t)
+			{
+				if (NCD_IsEntityProtectionBypassed(t))
+					return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+				
+				string vtPlayer = t.GetType();
+				if (NCD_Eff_Protect_PlayerClothingInVehicle(vtPlayer) == 1)
+				{
+					bool sealedForToxic = NCD_IsOccupantSealedForToxic(itemOwner, vtPlayer);
+					bool doorRule = false;
+					if (sealedForToxic && NCD_Eff_Occupant_DoorOpenDisablesProtectionInContaminated(itemOwner, vtPlayer) == 1)
+						doorRule = NCD_IsAnyDoorOpen(t);
+
+					if (!doorRule)
+					{
+						if (NCD_Eff_Occupant_NoDmgInVehicle(itemOwner, vtPlayer) == 1)
+						{
+							if (NCD_Eff_Occupant_BlockAllInVehicle(itemOwner, vtPlayer) == 1) return false;
+							if (damageType == DamageType.FIRE_ARM && NCD_Eff_Occupant_BlockBulletsInVehicle(itemOwner, vtPlayer) == 1) return false;
+							if (damageType == DamageType.EXPLOSION && NCD_Eff_Occupant_BlockExplosionsInVehicle(itemOwner, vtPlayer) == 1) return false;
+							if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Occupant_BlockMeleeInVehicle(itemOwner, vtPlayer) == 1) return false;
+						}
+
+						if (sealedForToxic && NCD_IsToxicAmmo(ammo))
+							return false;
+					}
+				}
+			}
+		}
+
+		else
+		{
+			EntityAI root = EntityAI.Cast(GetHierarchyRoot());
+			if (NCD_IsVehicleRootEntity(root))
+			{
+				if (NCD_IsEntityProtectionBypassed(root))
+					return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
+				string vt = root.GetType();
+				Transport rootTransport = Transport.Cast(root);
+				bool crashProtectionActive = NCD_IsCrashProtectionActive(rootTransport, vt);
+
+				if ((IsKindOf("SparkPlug") || IsKindOf("GlowPlug")) && damageType == DamageType.CUSTOM)
+				{
+					if (crashProtectionActive && NCD_IsAttachmentCustomCrashDamage(ammo))
+						return false;
+					else
+						return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+				}
+
+				if (damageType == DamageType.CUSTOM)
+				{
+					if (!NCD_IsAttachmentCustomCrashDamage(ammo))
+						return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+					
+					if (!crashProtectionActive)
+						return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+					
+					return false;
+				}
+
+				if (NCD_Eff_ProtectAttachments(vt) == 1)
+				{
+					if (damageType == DamageType.FIRE_ARM) return false;
+					if (damageType == DamageType.EXPLOSION) return false;
+					if (damageType == DamageType.CLOSE_COMBAT) return false;
+					if (damageType == DamageType.CUSTOM && NCD_IsAttachmentCustomCrashDamage(ammo)) return false;
+				}
 			}
 		}
 
@@ -681,20 +1148,83 @@ modded class ItemBase
 modded class PlayerBase
 {
 	protected int m_NCD_NoJumpDamageUntilMS = 0;
+	protected int m_NCD_JumpOutVehicleDamageHandledUntilMS = 0;
 	protected int m_NCD_LastFlipRpcMS = 0;
 
-	void NCD_ArmNoJumpDamageWindow(float carSpeed)
+	override void EEDelete(EntityAI parent)
+	{
+		if (g_Game && g_Game.IsServer())
+			NoCarDamageAPI.RemoveBypass(this);
+
+		super.EEDelete(parent);
+	}
+
+	void NCD_MarkJumpOutVehicleDamageHandled()
 	{
 		if (!g_Game || !g_Game.IsServer())
 			return;
 
+		m_NCD_JumpOutVehicleDamageHandledUntilMS = g_Game.GetTime() + 2000;
+	}
+
+	bool NCD_ConsumeJumpOutVehicleDamageHandled()
+	{
+		if (!g_Game || !g_Game.IsServer())
+			return false;
+
+		if (m_NCD_JumpOutVehicleDamageHandledUntilMS <= 0)
+			return false;
+
+		if (g_Game.GetTime() > m_NCD_JumpOutVehicleDamageHandledUntilMS)
+		{
+			m_NCD_JumpOutVehicleDamageHandledUntilMS = 0;
+			return false;
+		}
+
+		m_NCD_JumpOutVehicleDamageHandledUntilMS = 0;
+		return true;
+	}
+
+	bool NCD_ArmNoJumpDamageWindow(float carSpeed)
+	{
+		return NCD_ArmNoJumpDamageWindowKmh(NCD_GetJumpOutSpeedKmh(carSpeed));
+	}
+
+	bool NCD_ArmNoJumpDamageWindowKmh(float currentKmh)
+	{
+		if (!g_Game || !g_Game.IsServer())
+			return false;
+
+		if (NCD_IsEntityProtectionBypassed(this))
+			return false;
+
 		if (!NCD_ShouldProtectJumpOutForPlayer(this))
-			return;
+			return false;
 
-		if (carSpeed < 8.0)
-			return;
+		NCD_Config cfg = NCD_Cfg();
+		if (!cfg)
+			return false;
 
-		m_NCD_NoJumpDamageUntilMS = g_Game.GetTime() + 1500;
+		float minKmh = cfg.Player_NoDamageAfterJump_MinSpeedKmh;
+		float maxKmh = cfg.Player_NoDamageAfterJump_MaxSpeedKmh;
+		int windowMS = cfg.Player_NoDamageAfterJump_WindowMS;
+
+		if (currentKmh < minKmh)
+			return false;
+
+		if (maxKmh >= 0 && currentKmh > maxKmh)
+			return false;
+
+		if (windowMS < 0) windowMS = 0;
+		if (windowMS > 10000) windowMS = 10000;
+		if (windowMS <= 0)
+			return false;
+
+		int newUntil = g_Game.GetTime() + windowMS;
+		if (newUntil > m_NCD_NoJumpDamageUntilMS)
+			m_NCD_NoJumpDamageUntilMS = newUntil;
+
+		return true;
 	}
 
 	bool NCD_IsNoJumpDamageActive()
@@ -704,6 +1234,9 @@ modded class PlayerBase
 
 	override bool EEOnDamageCalculated(TotalDamageResult damageResult, int damageType, EntityAI source, int component, string dmgZone, string ammo, vector modelPos, float speedCoef)
 	{
+		if (NCD_IsEntityProtectionBypassed(this))
+			return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
 		if (NCD_IsNoJumpDamageActive())
 		{
 			if (!source)
@@ -720,14 +1253,35 @@ modded class PlayerBase
 
 		if (source && source.IsKindOf("Transport"))
 		{
+			if (NCD_IsEntityProtectionBypassed(source))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
 			string vtSrc = source.GetType();
 			if (NCD_ShouldIgnoreTransportHitForPlayer(this, vtSrc))
 				return false;
 		}
 
+		if (damageType == DamageType.CUSTOM)
+		{
+			string am = ammo;
+			am.ToLower();
+			if (am == "" || am.IndexOf("crash") != -1 || am.IndexOf("enviro") != -1)
+			{
+				if (NCD_ShouldBlockOccupantCrashDamage(this, damageType, ammo))
+					return false;
+
+				Transport tCrash = NCD_GetPlayerTransport(this);
+				if (tCrash && !NCD_IsCrashProtectionActive(tCrash, tCrash.GetType()))
+					return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+			}
+		}
+
 		Transport t = NCD_GetPlayerTransport(this);
 		if (t)
 		{
+			if (NCD_IsEntityProtectionBypassed(t))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
 			string vt = t.GetType();
 
 			bool sealedForToxic = NCD_IsOccupantSealedForToxic(this, vt);
@@ -755,7 +1309,6 @@ modded class PlayerBase
 
 	override void OnJumpOutVehicleFinish(float carSpeed)
 	{
-		NCD_ArmNoJumpDamageWindow(carSpeed);
 		super.OnJumpOutVehicleFinish(carSpeed);
 	}
 
@@ -782,6 +1335,9 @@ modded class PlayerBase
 			return;
 
 		if (t.CrewDriver() != this)
+			return;
+
+		if (NCD_IsEntityProtectionBypassed(t))
 			return;
 
 		string vt = t.GetType();
@@ -826,6 +1382,9 @@ modded class ZombieBase
 	{
 		if (source && source.IsKindOf("Transport"))
 		{
+			if (NCD_IsEntityProtectionBypassed(source))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
 			string vt = source.GetType();
 			if (NCD_Eff_Vehicle_NoDamageToZombies(vt) == 1)
 				return false;
@@ -841,6 +1400,9 @@ modded class AnimalBase
 	{
 		if (source && source.IsKindOf("Transport"))
 		{
+			if (NCD_IsEntityProtectionBypassed(source))
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
 			string vt = source.GetType();
 			if (NCD_Eff_Vehicle_NoDamageToAnimals(vt) == 1)
 				return false;

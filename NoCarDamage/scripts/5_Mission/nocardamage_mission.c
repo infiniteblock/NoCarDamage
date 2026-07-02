@@ -4,10 +4,11 @@ modded class MissionServer
 	{
 		super.OnInit();
 
-		Print("[NoCarDamage] MissionServer.OnInit scheduling config load+cleanup+scan");
+		Print("[NoCarDamage] MissionServer.OnInit scheduling config load+cleanup+scan+precrash-cache-cleanup");
 		g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(NCD_LoadConfigFromDisk, 1000, false);
 		g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(NCD_CleanupVehicleOverrides, 2000, false);
 		g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(NCD_ScanVehiclesAndExtendConfig, 3000, false);
+		g_Game.GetCallQueue(CALL_CATEGORY_SYSTEM).CallLater(NCD_CleanupPreCrashCache, 5000, true);
 	}
 };
 

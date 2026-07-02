@@ -8,9 +8,24 @@ modded class AreaExposureMdfr
 			return;
 		}
 
-		Transport t = NCD_GetPlayerTransport(player);
-		if (t && NCD_ShouldSuppressContaminatedAreaForPlayer(player, t))
+		if (NCD_IsEntityProtectionBypassed(player))
+		{
+			super.OnActivate(player);
 			return;
+		}
+
+		Transport t = NCD_GetPlayerTransport(player);
+		if (t)
+		{
+			if (NCD_IsEntityProtectionBypassed(t))
+			{
+				super.OnActivate(player);
+				return;
+			}
+			
+			if (NCD_ShouldSuppressContaminatedAreaForPlayer(player, t))
+				return;
+		}
 
 		super.OnActivate(player);
 	}
@@ -23,9 +38,24 @@ modded class AreaExposureMdfr
 			return;
 		}
 
-		Transport t = NCD_GetPlayerTransport(player);
-		if (t && NCD_ShouldSuppressContaminatedAreaForPlayer(player, t))
+		if (NCD_IsEntityProtectionBypassed(player))
+		{
+			super.OnTick(player, deltaT);
 			return;
+		}
+
+		Transport t = NCD_GetPlayerTransport(player);
+		if (t)
+		{
+			if (NCD_IsEntityProtectionBypassed(t))
+			{
+				super.OnTick(player, deltaT);
+				return;
+			}
+			
+			if (NCD_ShouldSuppressContaminatedAreaForPlayer(player, t))
+				return;
+		}
 
 		super.OnTick(player, deltaT);
 	}
