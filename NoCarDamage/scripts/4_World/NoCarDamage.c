@@ -1,3 +1,15 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * Original mod: NoCarDamage by blubberdiblupp
+ * Original source: https://github.com/Blubberdiblupp/NoCarDamage
+ *
+ * Modified by: Schmicky, 8/7/2026
+ * source: https://github.com/infiniteblock/NoCarDamage
+ * Changes: [Fix's for eAI,Toxic Zones,Player Damage"]
+ */
 bool NCD_IsGlassZone(string dmgZone)
 {
 	if (dmgZone == "")
@@ -50,7 +62,7 @@ bool NCD_IsExpansionAI(PlayerBase player)
 
 	string scriptCls = player.ClassName();
 	scriptCls.ToLower();
-	if (scriptCls.IndexOf("eaibase") != -1 || scriptCls.IndexOf("expansionai") != -1 || scriptCls == "eai")
+	if (scriptCls.IndexOf("eaibase") != -1 || scriptCls.IndexOf("expansionai") != -1 || scriptCls == "eai" || scriptCls.IndexOf("eai_") == 0)
 		return true;
 
 	return false;
@@ -268,7 +280,6 @@ bool NCD_IsToxicAmmo(string ammo)
 }
 
 static ref map<string, ref array<string>> NCD_DoorSlotCache_W = new map<string, ref array<string>>();
-static ref map<string, ref array<string>> NCD_DoorAnimCache_W = new map<string, ref array<string>>();
 static ref map<string, int> NCD_DoorOpenCacheTime_W = new map<string, int>();
 static ref map<string, bool> NCD_DoorOpenCacheVal_W = new map<string, bool>();
 static const int NCD_DOOR_OPEN_CACHE_MS = 2000;
@@ -320,33 +331,6 @@ static array<string> NCD_GetDoorSlotNames_W(string vt)
 	return slots;
 }
 
-static array<string> NCD_GetDoorAnimSourceNames_W(string vt)
-{
-	if (vt == "") return null;
-
-	ref array<string> cached;
-	if (NCD_DoorAnimCache_W.Find(vt, cached))
-		return cached;
-
-	ref array<string> sources = new array<string>();
-
-	string path = "CfgVehicles " + vt + " AnimationSources";
-	if (g_Game && g_Game.ConfigIsExisting(path))
-	{
-		int c = g_Game.ConfigGetChildrenCount(path);
-		for (int i = 0; i < c; i++)
-		{
-			string child;
-			g_Game.ConfigGetChildName(path, i, child);
-			if (NCD_IsDoorLikeName(child))
-				sources.Insert(child);
-		}
-	}
-
-	NCD_DoorAnimCache_W.Set(vt, sources);
-	return sources;
-}
-
 static void NCD_SetDoorOpenCache(string key, bool val)
 {
 	if (key == "" || !g_Game) return;
@@ -381,28 +365,38 @@ bool NCD_IsAnyDoorOpen(Transport t)
 
 	string vt = t.GetType();
 
-	array<string> sources = NCD_GetDoorAnimSourceNames_W(vt);
-	if (!sources)
+	CarScript car = CarScript.Cast(t);
+	if (!car)
+	{
+		// GetCarDoorsState is CarScript-specific (not available on boats/helicopters) -
+		// fall back to "not open" for non-car transports rather than erroring.
+		NCD_SetDoorOpenCache(key, false);
+		return false;
+	}
+
+	array<string> slots = NCD_GetDoorSlotNames_W(vt);
+	if (!slots)
 	{
 		NCD_SetDoorOpenCache(key, false);
 		return false;
 	}
 
-	for (int k = 0; k < sources.Count(); k++)
+	bool anyOpen = false;
+
+	for (int k = 0; k < slots.Count(); k++)
 	{
-		string s = sources[k];
+		string s = slots[k];
 		if (s == "") continue;
 
-		float ph = t.GetAnimationPhase(s);
-		if (ph > 0.5)
-		{
-			NCD_SetDoorOpenCache(key, true);
-			return true;
-		}
+		int state = car.GetCarDoorsState(s);
+
+		// Treat both OPEN and MISSING (door blown off/removed) as "not sealed"
+		if (state != CarDoorState.DOORS_CLOSED)
+			anyOpen = true;
 	}
 
-	NCD_SetDoorOpenCache(key, false);
-	return false;
+	NCD_SetDoorOpenCache(key, anyOpen);
+	return anyOpen;
 }
 
 bool NCD_IsTransportFlipped(Transport t)
@@ -1083,19 +1077,38 @@ modded class ItemBase
 					if (sealedForToxic && NCD_Eff_Occupant_DoorOpenDisablesProtectionInContaminated(itemOwner, vtPlayer) == 1)
 						doorRule = NCD_IsAnyDoorOpen(t);
 
-					if (!doorRule)
-					{
-						if (NCD_Eff_Occupant_NoDmgInVehicle(itemOwner, vtPlayer) == 1)
-						{
-							if (NCD_Eff_Occupant_BlockAllInVehicle(itemOwner, vtPlayer) == 1) return false;
-							if (damageType == DamageType.FIRE_ARM && NCD_Eff_Occupant_BlockBulletsInVehicle(itemOwner, vtPlayer) == 1) return false;
-							if (damageType == DamageType.EXPLOSION && NCD_Eff_Occupant_BlockExplosionsInVehicle(itemOwner, vtPlayer) == 1) return false;
-							if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Occupant_BlockMeleeInVehicle(itemOwner, vtPlayer) == 1) return false;
-						}
+					bool isToxicHit = sealedForToxic && NCD_IsToxicAmmo(ammo);
 
-						if (sealedForToxic && NCD_IsToxicAmmo(ammo))
-							return false;
+					// If this is toxic/contaminated damage and an open door should let it
+					// through, that takes priority over Player_BlockAllDamageWhileInVehicle
+					// (and the specific bullets/explosions/melee toggles) for this hit.
+					if (isToxicHit && doorRule)
+						return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+
+					// Player_BlockAllDamageWhileInVehicle is the strongest, independent
+					// override - it does not require Player_NoDamageWhileInVehicle.
+					if (NCD_Eff_Occupant_BlockAllInVehicle(itemOwner, vtPlayer) == 1) return false;
+
+					// Player_NoDamageWhileInVehicle is the master gate for the three
+					// specific damage-type toggles below - they only matter when this is
+					// also enabled (it doesn't block anything on its own).
+					if (NCD_Eff_Occupant_NoDmgInVehicle(itemOwner, vtPlayer) == 1)
+					{
+						if (damageType == DamageType.FIRE_ARM && NCD_Eff_Occupant_BlockBulletsInVehicle(itemOwner, vtPlayer) == 1) return false;
+						if (damageType == DamageType.EXPLOSION && NCD_Eff_Occupant_BlockExplosionsInVehicle(itemOwner, vtPlayer) == 1) return false;
+						if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Occupant_BlockMeleeInVehicle(itemOwner, vtPlayer) == 1) return false;
 					}
+
+					// Crash/environment damage (DamageType.CUSTOM) was never checked here at
+					// all, unlike the player's own health (which goes through
+					// NCD_ShouldBlockOccupantCrashDamage in PlayerBase.EEOnDamageCalculated).
+					// That meant clothing/attachments still took full crash damage even with
+					// Player_NoDamageWhileInVehicle and vehicle crash protection both enabled.
+					if (damageType == DamageType.CUSTOM && NCD_ShouldBlockOccupantCrashDamage(itemOwner, damageType, ammo))
+						return false;
+
+					if (isToxicHit)
+						return false;
 				}
 			}
 		}
@@ -1269,10 +1282,6 @@ modded class PlayerBase
 			{
 				if (NCD_ShouldBlockOccupantCrashDamage(this, damageType, ammo))
 					return false;
-
-				Transport tCrash = NCD_GetPlayerTransport(this);
-				if (tCrash && !NCD_IsCrashProtectionActive(tCrash, tCrash.GetType()))
-					return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
 			}
 		}
 
@@ -1289,19 +1298,19 @@ modded class PlayerBase
 			if (sealedForToxic && NCD_Eff_Occupant_DoorOpenDisablesProtectionInContaminated(this, vt) == 1)
 				doorRule = NCD_IsAnyDoorOpen(t);
 
-			if (!doorRule)
+			bool isToxicHit = sealedForToxic && NCD_IsToxicAmmo(ammo);
+			if (isToxicHit && doorRule)
+				return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
+			if (NCD_Eff_Occupant_BlockAllInVehicle(this, vt) == 1) return false;
+			if (NCD_Eff_Occupant_NoDmgInVehicle(this, vt) == 1)
 			{
-				if (NCD_Eff_Occupant_NoDmgInVehicle(this, vt) == 1)
-				{
-					if (NCD_Eff_Occupant_BlockAllInVehicle(this, vt) == 1) return false;
-					if (damageType == DamageType.FIRE_ARM && NCD_Eff_Occupant_BlockBulletsInVehicle(this, vt) == 1) return false;
-					if (damageType == DamageType.EXPLOSION && NCD_Eff_Occupant_BlockExplosionsInVehicle(this, vt) == 1) return false;
-					if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Occupant_BlockMeleeInVehicle(this, vt) == 1) return false;
-				}
-
-				if (sealedForToxic && NCD_IsToxicAmmo(ammo))
-					return false;
+				if (damageType == DamageType.FIRE_ARM && NCD_Eff_Occupant_BlockBulletsInVehicle(this, vt) == 1) return false;
+				if (damageType == DamageType.EXPLOSION && NCD_Eff_Occupant_BlockExplosionsInVehicle(this, vt) == 1) return false;
+				if (damageType == DamageType.CLOSE_COMBAT && NCD_Eff_Occupant_BlockMeleeInVehicle(this, vt) == 1) return false;
 			}
+
+			if (isToxicHit)
+				return false;
 		}
 
 		return super.EEOnDamageCalculated(damageResult, damageType, source, component, dmgZone, ammo, modelPos, speedCoef);
