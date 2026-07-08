@@ -1,3 +1,15 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * Original mod: NoCarDamage by blubberdiblupp
+ * Original source: https://github.com/Blubberdiblupp/NoCarDamage
+ *
+ * Modified by: Schmicky, 8/7/2026
+ * source: https://github.com/infiniteblock/NoCarDamage
+ * Changes: [Fix's for eAI,Toxic Zones,Player Damage"]
+ */
 static const string NCD_CFG_DIR  = "$profile:NoCarDamage";
 static const string NCD_CFG_PATH = "$profile:NoCarDamage\\NoCarDamage_Config.json";
 static const int NCD_CFG_VERSION = 22;
@@ -860,7 +872,13 @@ bool NCD_CompactVehicleOverrides()
 	if (!g_NCD_Cfg || !g_NCD_Cfg.VehicleOverrides)
 		return false;
 
-	bool dropNoOps = (g_NCD_Cfg.AutoExtendVehicleOverrides == 0);
+	// Previously, turning AutoExtendVehicleOverrides off would prune every override entry
+	// that was still fully "no-op" (all fields at -1/inherit). That meant disabling
+	// auto-extend right after it generated a fresh template list would wipe the whole list
+	// before an admin got a chance to customize anything. A no-op entry is harmless
+	// clutter, not something that needs aggressive cleanup, so it's no longer dropped here -
+	// only truly invalid entries (empty classname, or a classname that no longer resolves
+	// to a real vehicle) get removed.
 	bool changed = false;
 
 	ref array<ref NCD_VehicleOverride> compacted = new array<ref NCD_VehicleOverride>();
@@ -882,11 +900,6 @@ bool NCD_CompactVehicleOverrides()
 		}
 
 		bool noOp = NCD_IsOverrideNoOp(o);
-		if (dropNoOps && noOp)
-		{
-			changed = true;
-			continue;
-		}
 
 		int existingIndex = -1;
 		if (classToIndex.Find(o.ClassName, existingIndex))
