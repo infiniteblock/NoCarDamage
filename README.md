@@ -9,8 +9,10 @@ Stop vehicles from taking crash damage, bullet damage, explosion damage, and mor
 The mod generates a config file on first start, so you can quickly enable/disable features globally and override them per vehicle class.
 If you want player not drown from water damage, change Vanilla drown settings in cfggameplaysettings.json.
 _______________________________________________________________
-
-
+Full Credit For the Origional Mod:
+Fabian Baldensperger
+baldensperger@gmx.ch
+_______________________________________________________________
 How the config works
 
 On first run the mod generates:
