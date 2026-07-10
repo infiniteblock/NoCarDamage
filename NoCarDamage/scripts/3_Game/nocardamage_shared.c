@@ -8,11 +8,11 @@
  *
  * Modified by: Schmicky, 8/7/2026
  * source: https://github.com/infiniteblock/NoCarDamage
- * Changes: [Fix's for eAI,Toxic Zones,Player Damage"]
+ * Changes: [Fix's for eAI,Toxic Zones,Player Damage]
  */
 static const string NCD_CFG_DIR  = "$profile:NoCarDamage";
 static const string NCD_CFG_PATH = "$profile:NoCarDamage\\NoCarDamage_Config.json";
-static const int NCD_CFG_VERSION = 22;
+static const int NCD_CFG_VERSION = 23;
 static const int NCD_RPC_FLIP = 4000971;
 static const int NCD_PRECRASH_CACHE_MS = 1000;
 
@@ -128,6 +128,11 @@ class NCD_Config
 	int ExpansionAI_NoDamageAfterJumpFromVehicle = 0;
 	int EnableVehicleOverrides = 1;
 	int AutoExtendVehicleOverrides = 0;
+	// Opt-in: when enabled, compaction drops VehicleOverrides entries where every field is
+	// still at -1/inherit (i.e. never actually customized). Off by default - a no-op entry
+	// is harmless clutter, not something that needs automatic cleanup, and pruning is
+	// independent of AutoExtendVehicleOverrides (which no longer triggers pruning on its own).
+	int PruneUnchangedVehicleOverrides = 0;
 	ref array<ref NCD_VehicleOverride> VehicleOverrides;
 
 	void NCD_Config()
@@ -451,6 +456,13 @@ bool NCD_MigrateConfig()
 		changed = true;
 	}
 
+	if (g_NCD_Cfg.Version < 23)
+	{
+		g_NCD_Cfg.PruneUnchangedVehicleOverrides = 0;
+		g_NCD_Cfg.Version = 23;
+		changed = true;
+	}
+
 	if (g_NCD_Cfg.Version < NCD_CFG_VERSION)
 	{
 		g_NCD_Cfg.Version = NCD_CFG_VERSION;
@@ -695,6 +707,7 @@ bool NCD_BackfillMissingConfigKeys()
 	g_NCD_Cfg.Protect_AttachmentsOnVehicle = NCD_NormalizeBool01(g_NCD_Cfg.Protect_AttachmentsOnVehicle, defaults.Protect_AttachmentsOnVehicle);
 	g_NCD_Cfg.EnableVehicleOverrides = NCD_NormalizeBool01(g_NCD_Cfg.EnableVehicleOverrides, defaults.EnableVehicleOverrides);
 	g_NCD_Cfg.AutoExtendVehicleOverrides = NCD_NormalizeBool01(g_NCD_Cfg.AutoExtendVehicleOverrides, defaults.AutoExtendVehicleOverrides);
+	g_NCD_Cfg.PruneUnchangedVehicleOverrides = NCD_NormalizeBool01(g_NCD_Cfg.PruneUnchangedVehicleOverrides, defaults.PruneUnchangedVehicleOverrides);
 
 	g_NCD_Cfg.ExpansionAI_NoDamageWhileInVehicle = NCD_NormalizeBool01(g_NCD_Cfg.ExpansionAI_NoDamageWhileInVehicle, defaults.ExpansionAI_NoDamageWhileInVehicle);
 	g_NCD_Cfg.ExpansionAI_BlockAllDamageWhileInVehicle = NCD_NormalizeBool01(g_NCD_Cfg.ExpansionAI_BlockAllDamageWhileInVehicle, defaults.ExpansionAI_BlockAllDamageWhileInVehicle);
@@ -872,14 +885,27 @@ bool NCD_CompactVehicleOverrides()
 	if (!g_NCD_Cfg || !g_NCD_Cfg.VehicleOverrides)
 		return false;
 
-	// Previously, turning AutoExtendVehicleOverrides off would prune every override entry
-	// that was still fully "no-op" (all fields at -1/inherit). That meant disabling
-	// auto-extend right after it generated a fresh template list would wipe the whole list
-	// before an admin got a chance to customize anything. A no-op entry is harmless
-	// clutter, not something that needs aggressive cleanup, so it's no longer dropped here -
-	// only truly invalid entries (empty classname, or a classname that no longer resolves
-	// to a real vehicle) get removed.
+	// Turning AutoExtendVehicleOverrides off no longer prunes no-op entries on its own -
+	// that used to wipe a freshly-generated template list before an admin got a chance to
+	// customize anything. Pruning is now controlled by its own explicit, opt-in setting:
+	// PruneUnchangedVehicleOverrides. Off by default (no-op entries are harmless clutter,
+	// not something that needs automatic cleanup). Regardless of that setting, truly invalid
+	// entries (empty classname, or a classname that no longer resolves to a real vehicle)
+	// are always removed.
+	bool dropNoOps = (g_NCD_Cfg.PruneUnchangedVehicleOverrides == 1);
 	bool changed = false;
+
+	if (dropNoOps)
+	{
+		// Auto-disable after running once, matching the same "run once, then turn off"
+		// pattern as AutoExtendVehicleOverrides. The intended workflow is: configure your
+		// per-vehicle overrides first, then run this once to shrink the config down to just
+		// what you actually changed - not leave it on permanently, which would immediately
+		// prune any freshly-added no-op entries (e.g. from a later AutoExtendVehicleOverrides
+		// run) before you get a chance to customize them.
+		g_NCD_Cfg.PruneUnchangedVehicleOverrides = 0;
+		changed = true;
+	}
 
 	ref array<ref NCD_VehicleOverride> compacted = new array<ref NCD_VehicleOverride>();
 	ref map<string, int> classToIndex = new map<string, int>();
@@ -900,6 +926,12 @@ bool NCD_CompactVehicleOverrides()
 		}
 
 		bool noOp = NCD_IsOverrideNoOp(o);
+
+		if (dropNoOps && noOp)
+		{
+			changed = true;
+			continue;
+		}
 
 		int existingIndex = -1;
 		if (classToIndex.Find(o.ClassName, existingIndex))
@@ -1011,15 +1043,18 @@ void NCD_LoadConfigFromDisk()
 		MakeDirectory(NCD_CFG_DIR);
 
 	bool created = false;
+	string errorMessage;
 
 	if (FileExist(NCD_CFG_PATH))
 	{
-		JsonFileLoader<NCD_Config>.JsonLoadFile(NCD_CFG_PATH, g_NCD_Cfg);
+		if (!JsonFileLoader<NCD_Config>.LoadFile(NCD_CFG_PATH, g_NCD_Cfg, errorMessage))
+			Print("[NoCarDamage] Failed to read config, using in-memory defaults: " + errorMessage);
 	}
 	else
 	{
 		created = true;
-		JsonFileLoader<NCD_Config>.JsonSaveFile(NCD_CFG_PATH, g_NCD_Cfg);
+		if (!JsonFileLoader<NCD_Config>.SaveFile(NCD_CFG_PATH, g_NCD_Cfg, errorMessage))
+			Print("[NoCarDamage] Failed to save initial config: " + errorMessage);
 	}
 
 	if (!g_NCD_Cfg.VehicleOverrides)
@@ -1033,13 +1068,19 @@ void NCD_LoadConfigFromDisk()
 	bool compacted = NCD_CompactVehicleOverrides();
 	if (upgraded || backfilled || compacted)
 	{
-		JsonFileLoader<NCD_Config>.JsonSaveFile(NCD_CFG_PATH, g_NCD_Cfg);
-		if (upgraded)
-			Print("[NoCarDamage] Config upgraded to Version=" + g_NCD_Cfg.Version.ToString() + " -> saved config");
-		if (backfilled)
-			Print("[NoCarDamage] Config backfilled missing keys -> saved config");
-		if (compacted)
-			Print("[NoCarDamage] Config compacted duplicate/empty no-op vehicle overrides -> saved config");
+		if (!JsonFileLoader<NCD_Config>.SaveFile(NCD_CFG_PATH, g_NCD_Cfg, errorMessage))
+		{
+			Print("[NoCarDamage] Failed to save updated config: " + errorMessage);
+		}
+		else
+		{
+			if (upgraded)
+				Print("[NoCarDamage] Config upgraded to Version=" + g_NCD_Cfg.Version.ToString() + " -> saved config");
+			if (backfilled)
+				Print("[NoCarDamage] Config backfilled missing keys -> saved config");
+			if (compacted)
+				Print("[NoCarDamage] Config compacted duplicate/empty no-op vehicle overrides -> saved config");
+		}
 	}
 
 	NCD_RebuildOverrideMap();
@@ -1475,7 +1516,12 @@ void NCD_CleanupVehicleOverrides()
 	if (NCD_CompactVehicleOverrides())
 	{
 		int removed = before - cfg.VehicleOverrides.Count();
-		JsonFileLoader<NCD_Config>.JsonSaveFile(NCD_CFG_PATH, cfg);
+		string errorMessage;
+		if (!JsonFileLoader<NCD_Config>.SaveFile(NCD_CFG_PATH, cfg, errorMessage))
+		{
+			Print("[NoCarDamage] Failed to save config after cleanup: " + errorMessage);
+			return;
+		}
 		Print("[NoCarDamage] Cleanup compacted " + removed.ToString() + " invalid/duplicate/no-op override entries -> saved config");
 		NCD_RebuildOverrideMap();
 	}
@@ -1538,15 +1584,26 @@ void NCD_ScanVehiclesAndExtendConfig()
 		added++;
 	}
 
+	// Auto-disable itself after running once, so it doesn't keep re-scanning every server
+	// restart once it's done its job. The generated entries persist regardless - this just
+	// stops the scan from running again until an admin explicitly re-enables it.
+	cfg.AutoExtendVehicleOverrides = 0;
+
+	string errorMessage;
+	if (!JsonFileLoader<NCD_Config>.SaveFile(NCD_CFG_PATH, g_NCD_Cfg, errorMessage))
+	{
+		Print("[NoCarDamage] Failed to save config after vehicle scan: " + errorMessage);
+		return;
+	}
+
 	if (added > 0)
 	{
-		JsonFileLoader<NCD_Config>.JsonSaveFile(NCD_CFG_PATH, g_NCD_Cfg);
-		Print("[NoCarDamage] Vehicle scan added " + added.ToString() + " new entries -> saved config");
+		Print("[NoCarDamage] Vehicle scan added " + added.ToString() + " new entries -> saved config, AutoExtendVehicleOverrides disabled");
 		NCD_RebuildOverrideMap();
 	}
 	else
 	{
-		Print("[NoCarDamage] Vehicle scan: no new entries");
+		Print("[NoCarDamage] Vehicle scan: no new entries -> AutoExtendVehicleOverrides disabled");
 	}
 }
 
